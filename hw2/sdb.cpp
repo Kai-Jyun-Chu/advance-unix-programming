@@ -34,6 +34,7 @@ struct EntryInfo {
 };
 
 //===========================helper===========================================
+//return false when in the region
 bool check_region(uintptr_t addr){
     for(int i=0;i<exe_region.size();i+=2){
         if(exe_region[i]<=addr&&addr<=exe_region[i+1]){
@@ -152,7 +153,7 @@ static inline void poke8(uintptr_t addr, uint8_t val)
 void break_at(const string& addr_str) {
     uintptr_t addr = stoul(addr_str, nullptr, 16);
 
-    if (addr < exec_start || addr >= exec_end) {
+    if (check_region(addr)) {
         cout << "** the target address is not valid." << endl;
         return;
     }
@@ -178,7 +179,7 @@ void break_rva(const string& off_str){
     }
 
     uintptr_t addr = load_base + offset;
-    if (addr < exec_start || addr >= exec_end) {
+    if (check_region(addr)) {
         cout << "** the target address is not valid." << endl;
         return;
     }
@@ -209,16 +210,70 @@ void info_break(){
     }
     if (!any) cout << "** no breakpoints." << endl;
 }
-void delete_break(){
+void delete_break(int id)
+{
+    if (id >= bp_table.size() || bp_table[id] == UINTPTR_MAX) {
+        cout << "** breakpoint " << id << " does not exist." << endl;
+        return;
+    }
+    uintptr_t addr = bp_table[id];
 
+    
+    if (breakpoints.count(addr)) {
+        poke8(addr, breakpoints[addr]);       
+        breakpoints.erase(addr);              // remove 
+    }
+    bp_table[id] = UINTPTR_MAX;
+
+    cout << "** delete breakpoint " << id << "." << endl;
+}
+
+void patch(const string addr, const string hex_string){
+    uintptr_t haddr = stoul(addr, nullptr, 16);
+    
+    if(check_region(haddr)){
+        cout<<"** the target address is not valid.."<<endl;
+        return;
+    }
+    if(check_region(haddr+hex_string.size())){
+        cout<<"** the target address is not valid.."<<endl;
+        return;
+    }
+
+    vector<uint8_t> bytes;
+    bytes.reserve(hex_string.size() / 2);
+    for (size_t i = 0; i < hex_string.size(); i += 2) {
+        string byte_str = hex_string.substr(i, 2);
+        bytes.push_back(static_cast<uint8_t>(stoul(byte_str, nullptr, 16)));
+    }
+
+    uintptr_t end_addr = haddr + bytes.size() - 1;
+    if (check_region(haddr) || check_region(end_addr)) {
+        cout << "** the target address is not valid." << endl;
+        return;
+    }
+
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        uintptr_t cur = haddr + i;
+        bool on_bp = breakpoints.count(cur);
+        uint8_t to_write = on_bp ? 0xCC : bytes[i];
+
+        poke8(cur, to_write);                
+        if (on_bp)                           
+            breakpoints[cur] = bytes[i];     
+    }
+
+    cout << "** patch memory at 0x" << hex << addr << "." << endl;
 }
 
 void disassemble_instructions(pid_t pid, uintptr_t addr){
     
     find_executable_range(pid);
+    /*
     for(int i=0;i<exe_region.size();i+=2){
         printf("[Range]: %lx ~ %lx\n",exe_region[i],exe_region[i+1]);
     }
+    */
     // Open 
     string mem_path = "/proc/" + to_string(pid) + "/mem";
     int mem_fd = open(mem_path.c_str(), O_RDONLY);
@@ -245,12 +300,13 @@ void disassemble_instructions(pid_t pid, uintptr_t addr){
     //cout<<"to_rd: "<<to_rd<<endl;
     uint8_t buffer[to_rd];
     ssize_t bytes_read = read(mem_fd, buffer, to_rd);
+    /*
     printf("Raw instruction bytes at 0x%lx:\n", addr);
     for (size_t i = 0; i < bytes_read; ++i) {
         printf("%02x ", buffer[i]);
     }
     printf("\n");
-
+    */
     for (size_t i = 0; i < bytes_read; ++i) {
         uintptr_t curr_addr = addr + i;
         if (breakpoints.count(curr_addr)) {
@@ -442,8 +498,57 @@ void continue_exe() {
         }
     }
 }
+void sc(){
+    user_regs_struct regs;
+    ptrace(PTRACE_GETREGS, child_pid, nullptr, &regs);    
+    //check on bp already
+    if (breakpoints.count(regs.rip)) {
+        poke8(regs.rip, breakpoints[regs.rip]);
+        ptrace(PTRACE_SINGLESTEP, child_pid, nullptr, nullptr);
+        waitpid(child_pid, nullptr, 0);
+        poke8(regs.rip, 0xCC);
+        ptrace(PTRACE_GETREGS, child_pid, nullptr, &regs);
+    }
+    while(true){
+        ptrace(PTRACE_SYSCALL, child_pid, 0, 0);
+        int status;
+        waitpid(child_pid, &status, 0);
+        if (WIFEXITED(status)) {
+            cout << "** the target program terminated." << endl;
+            break;
+        }
 
+        user_regs_struct regs;
+        ptrace(PTRACE_GETREGS, child_pid, nullptr, &regs);
+        if (cont_break_hit(regs)) {
+            printf("[It's actually a BREAK]\n");
+            return;
+        }
+        uint8_t buf[2];
+        buf[0]=peek8(regs.rip-2);
+        buf[1]=peek8(regs.rip-1);
+        //printf("[sys instruction]: %x, %x\n", buf[0],buf[1]);
+        if (buf[0] == 0x0f && buf[1] == 0x05) {
+            //printf("[FIND SYSCALL]\n");
+            static bool in_syscall = false;
+            uintptr_t syscall_nr = 0;
 
+            if (!in_syscall) {
+                
+                printf("** enter a syscall(%lld) at 0x%llx.\n", regs.orig_rax, regs.rip-2);
+                disassemble_instructions(child_pid, regs.rip-2);
+                in_syscall = true;
+            } else {
+                
+                printf("** leave a syscall(%llx) = %lld at 0x%llx.", regs.orig_rax, regs.rax, regs.rip-2);
+                disassemble_instructions(child_pid, regs.rip-2);
+                
+                in_syscall = false;
+            }
+            break;
+        }
+    }
+}
 int main(int argc, char* argv[]) {
     string line;
     // ./sdb ./hello
@@ -479,7 +584,17 @@ int main(int argc, char* argv[]) {
             string hex;
             iss >> hex;
             break_rva(hex);
-        } 
+        } else if(cmd == "delete"){
+            int id;
+            iss>> id;
+            delete_break(id);
+        } else if(cmd == "patch"){
+            string addr, hex_string;
+            iss>>addr>>hex_string;
+            patch(addr, hex_string);
+        } else if (cmd == "syscall"){
+            sc();
+        }
         else if (cmd == "si") {
             step_instruction();
         } else if (cmd == "cont") {
