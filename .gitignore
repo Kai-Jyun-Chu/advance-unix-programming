@@ -1,0 +1,27 @@
+# HW1 compiled libraries and archives
+hw1/*.so
+hw1/*.so.*
+hw1/*.tar
+hw1/index.html*
+hw1/correct*.txt
+
+# HW2 executables and test environment
+hw2/sdb
+hw2/anon
+hw2/hello
+hw2/hola
+hw2/mortis
+hw2/rana
+hw2/soyorin
+hw2/libc.so.6
+hw2/ld-linux-x86-64.so.2
+hw2/hw2_testing_program/
+
+# General
+*.o
+core
+core.*
+
+# HW1 test executables
+hw1/ex1
+hw1/ex3

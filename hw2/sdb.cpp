@@ -19,6 +19,7 @@ pid_t child_pid = -1;
 string loaded_program;
 uintptr_t entry_point = 0;
 bool program_loaded = false;
+uint8_t term=0;
 uintptr_t exec_start = 0;
 uintptr_t exec_end = 0;
 uintptr_t load_base = 0;
@@ -235,7 +236,7 @@ void patch(const string addr, const string hex_string){
         cout<<"** the target address is not valid.."<<endl;
         return;
     }
-    if(check_region(haddr+hex_string.size())){
+    if(check_region(haddr+hex_string.size()/2-1)){
         cout<<"** the target address is not valid.."<<endl;
         return;
     }
@@ -247,7 +248,7 @@ void patch(const string addr, const string hex_string){
         bytes.push_back(static_cast<uint8_t>(stoul(byte_str, nullptr, 16)));
     }
 
-    uintptr_t end_addr = haddr + bytes.size() - 1;
+    uintptr_t end_addr = haddr + hex_string.size()/2 - 1;
     if (check_region(haddr) || check_region(end_addr)) {
         cout << "** the target address is not valid." << endl;
         return;
@@ -307,6 +308,7 @@ void disassemble_instructions(pid_t pid, uintptr_t addr){
     }
     printf("\n");
     */
+   
     for (size_t i = 0; i < bytes_read; ++i) {
         uintptr_t curr_addr = addr + i;
         if (breakpoints.count(curr_addr)) {
@@ -359,6 +361,15 @@ void set_breakpoint_at_entry() {
     // Replace first byte with 0xCC (int3)
     long patched = (original & ~0xff) | 0xcc;
     ptrace(PTRACE_POKETEXT, child_pid, entry_point, patched);
+    ptrace(PTRACE_CONT, child_pid, nullptr, nullptr);
+    int status;
+    waitpid(child_pid, &status, 0);
+    ptrace(PTRACE_POKETEXT, child_pid, entry_point, original);
+    user_regs_struct regs;
+    ptrace(PTRACE_GETREGS, child_pid, nullptr, &regs);
+    regs.rip = regs.rip-1;
+    ptrace(PTRACE_SETREGS, child_pid, nullptr, &regs);
+
 }
 void load_program(const string& path) {
     if (program_loaded) {
@@ -387,23 +398,22 @@ void load_program(const string& path) {
         program_loaded = true;
 
         printf("** program '%s' loaded. entry point: 0x%lx.\n", path.c_str(), entry_point);
-        printf("%lx, %lx\n", exec_start, exec_end);
+        //printf("%lx, %lx\n", exec_start, exec_end);
         disassemble_instructions(pid, entry_point);
 
         // Set breakpoint at entry point
-        if(info.is_pie){
+        //if(info.is_pie){
             set_breakpoint_at_entry();
-            ptrace(PTRACE_CONT, child_pid, nullptr, nullptr);
-            int status;
-            waitpid(child_pid, &status, 0);
-        }
+
+
+        //}
 
     }
 }
 bool handle_break_hit(user_regs_struct &regs)
 {
     uintptr_t rip = regs.rip;
-    printf("si RIP: %lx\n", rip);
+    //printf("si RIP: %lx\n", rip);
 
     if (!breakpoints.count(rip)) return false;      
 
@@ -437,7 +447,7 @@ void step_instruction()
         }
         waitpid(child_pid, &status, 0);
         if (WIFEXITED(status)) {
-            cout << "** the target program terminated." << endl;
+            cout << "** the target program terminated." << endl;term=1;
             program_loaded = false; child_pid = -1;
             return;
         }
@@ -457,7 +467,7 @@ void step_instruction()
 bool cont_break_hit(user_regs_struct &regs)
 {
     uintptr_t rip = regs.rip;
-    printf("cont RIP: %lx\n",rip);
+    //printf("cont RIP: %lx\n",rip);
     uintptr_t bp_addr = rip - 1;
     if (breakpoints.count(bp_addr)) {
         cout << "** hit a breakpoint at 0x" << hex << bp_addr << "." << endl;
@@ -487,7 +497,7 @@ void continue_exe() {
         int status; waitpid(child_pid, &status, 0);
 
         if (WIFEXITED(status)) {                         // program done
-            cout << "** the target program terminated." << endl;
+            cout << "** the target program terminated." << endl;term=1;
             program_loaded = false; child_pid = -1;
             return;
         }
@@ -514,14 +524,14 @@ void sc(){
         int status;
         waitpid(child_pid, &status, 0);
         if (WIFEXITED(status)) {
-            cout << "** the target program terminated." << endl;
+            cout << "** the target program terminated." << endl;term=1;
             break;
         }
 
         user_regs_struct regs;
         ptrace(PTRACE_GETREGS, child_pid, nullptr, &regs);
         if (cont_break_hit(regs)) {
-            printf("[It's actually a BREAK]\n");
+            //printf("[It's actually a BREAK]\n");
             return;
         }
         uint8_t buf[2];
@@ -540,7 +550,7 @@ void sc(){
                 in_syscall = true;
             } else {
                 
-                printf("** leave a syscall(%llx) = %lld at 0x%llx.", regs.orig_rax, regs.rax, regs.rip-2);
+                printf("** leave a syscall(%llx) = %lld at 0x%llx.\n", regs.orig_rax, regs.rax, regs.rip-2);
                 disassemble_instructions(child_pid, regs.rip-2);
                 
                 in_syscall = false;
@@ -555,13 +565,16 @@ int main(int argc, char* argv[]) {
     if (argc >= 2) {
         load_program(argv[1]);
     }
-
+    
     prompt();
     while (getline(cin, line)) {
         istringstream iss(line);
         string cmd;
         iss >> cmd;
-
+        
+        if(term==1){
+            break;
+        }
         if (cmd == "load") {
             string path;
             iss >> path;
